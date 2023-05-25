@@ -2,15 +2,15 @@ from copy import deepcopy
 
 import numpy as np
 from matplotlib import patches, pyplot as plt
-from scipy.ndimage import gaussian_filter
-from skimage.filters import threshold_triangle
+from skimage.filters import threshold_triangle, gaussian
 
 
 def get_beam_data(
     img,
-    roi_data=None,
+    roi=None,
     n_stds=2,
     min_beam_intensity=10000,
+    threshold=None,
     enforce_penalty=True,
     visualize=False,
 ):
@@ -40,33 +40,44 @@ def get_beam_data(
 
 
     :param img: N x M nd.array containing image data
-    :param roi_data: matplotlib style bounding box coordinates [lower_left_x,
+    :param roi: matplotlib style bounding box coordinates [lower_left_x,
     lower_left_y, width, height]
     :param n_stds: float, size of box around beam in standard deviations
     :param visualize: bool, visualize image processing
     :param min_beam_intensity: float, minimum total pixel intensity required to
     positively identify a beam
+    :param threshold: float, explicit threshold
     :param enforce_penalty: bool, flag to replace measurements with Nans if `penalty` > 0
 
     :return: dict
     """
-    if roi_data is not None:
+    if roi is not None:
         cropped_image = deepcopy(img)[
-            roi_data[0] : roi_data[0] + roi_data[2],
-            roi_data[1] : roi_data[1] + roi_data[3],
-        ]
+                        roi[0]: roi[0] + roi[2],
+                        roi[1]: roi[1] + roi[3],
+                        ]
     else:
         cropped_image = deepcopy(img)
-        roi_data = [0, 0, *cropped_image.shape]
+        roi = [0, 0, *cropped_image.shape]
 
-    filtered_image = gaussian_filter(cropped_image, 3.0)
+    filtered_image = gaussian(cropped_image, 3.0)
 
-    threshold = threshold_triangle(filtered_image)
+    if threshold is None:
+        threshold = threshold_triangle(filtered_image)
     thresholded_image = np.where(
         filtered_image - threshold > 0, filtered_image - threshold, 0
     )
 
+    # penalize no beam
     total_intensity = np.sum(thresholded_image)
+    if total_intensity < min_beam_intensity:
+        results = {
+            "penalty": 1000, "total_intensity": total_intensity, "threshold": threshold
+        }
+        for name in ["Cx", "Cy", "Sx", "Sy"]:
+            results[name] = None
+
+        return results
 
     cx, cy, sx, sy = calculate_stats(thresholded_image)
     c = np.array((cx, cy))
@@ -83,7 +94,7 @@ def get_beam_data(
     )
 
     # get distance from beam region to ROI center
-    roi_c = np.array((roi_data[2], roi_data[3])) / 2
+    roi_c = np.array((roi[2], roi[3])) / 2
     roi_radius = np.min((roi_c * 2, np.array(thresholded_image.shape))) / 2
 
     # validation
@@ -112,13 +123,9 @@ def get_beam_data(
         "Sx": sx,
         "Sy": sy,
         "penalty": penalty,
+        "total_intensity": total_intensity,
+        "threshold": threshold
     }
-
-    # penalize no beam
-    if total_intensity < min_beam_intensity:
-        penalty = 1000
-        for name in ["Cx", "Cy", "Sx", "Sy"]:
-            results[name] = None
 
     # enforce penalty
     if penalty > 0 and enforce_penalty:
